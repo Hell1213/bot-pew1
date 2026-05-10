@@ -1,6 +1,6 @@
 {
   "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
-  "name": "bot-pew1",
+  "name": "ModSignal",
   "post": {
     "dir": "dist/client",
     "entrypoints": {
@@ -20,26 +20,26 @@
   "menu": {
     "items": [
       {
-        "label": "Create a new post",
-        "description": "bot-pew1",
+        "label": "ModSignal Dashboard",
+        "description": "Open the ModSignal moderation dashboard",
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/post-create"
       },
       {
-        "label": "Example form",
-        "description": "Show a simple form",
-        "location": "subreddit",
+        "label": "Dismiss Alert",
+        "description": "Dismiss a ModSignal alert",
+        "location": "post",
         "forUserType": "moderator",
-        "endpoint": "/internal/menu/example-form"
+        "endpoint": "/internal/menu/dismiss-alert"
       }
     ]
   },
-  "forms": {
-    "exampleForm": "/internal/form/example-submit"
-  },
   "triggers": {
-    "onAppInstall": "/internal/triggers/on-app-install"
+    "onAppInstall": "/internal/triggers/on-app-install",
+    "onPostCreate": "/internal/triggers/on-post-create",
+    "onCommentCreate": "/internal/triggers/on-comment-create",
+    "onCronTick": "/internal/triggers/on-cron-tick"
   },
   "scripts": {
     "dev": "vite build --watch",
