@@ -1,27 +1,83 @@
-## Devvit React Starter
+# ModSignal 🤖
 
-A starter to build web applications on Reddit's developer platform
+**Reddit moderation intelligence bot** — detects coordinated inauthentic behaviour and alerts moderators. Built entirely on Reddit's Devvit platform.
 
-- [Devvit](https://developers.reddit.com/): A way to build and deploy immersive games on Reddit
-- [Vite](https://vite.dev/): For compiling the webView
-- [React](https://react.dev/): For UI
-- [Hono](https://hono.dev/): For backend logic
-- [Tailwind](https://tailwindcss.com/): For styles
-- [TypeScript](https://www.typescriptlang.org/): For type safety
+## What ModSignal Detects
 
-## Getting Started
+- **Burst Activity** — sudden spikes in posting/commenting (z-score analysis)
+- **New Account Surges** — coordinated raids from fresh accounts
+- **Account Similarity** — fingerprint matching to find ban evasion rings
+- **Coordinated Behaviour** — clustering accounts by feature vector similarity
 
-> Make sure you have Node 22 downloaded on your machine before running!
+## How It Works
 
-1. Run `npm create devvit@latest --template=react`
-2. Go through the installation wizard. You will need to create a Reddit account and connect it to Reddit developers
-3. Copy the command on the success page into your terminal
+1. **Triggers** capture every PostCreate and CommentCreate event
+2. **Window Manager** stores events in rolling 5-minute buckets (Devvit KV)
+3. **Scoring Engine** runs every 5 minutes:
+   - Computes baseline activity statistics
+   - Detects bursts via z-score analysis
+   - Builds account fingerprints (7-dimension feature vectors)
+   - Clusters similar accounts using cosine similarity
+   - Computes suspicion scores (0–100)
+4. **Alert Dispatcher** posts mod-distinguished sticky comments
+5. **Dashboard** (React UI) shows active alerts with dismiss actions
+6. **Auto-Tune** adjusts burst threshold based on false-positive feedback
+
+## Quick Start
+
+```bash
+npm install
+npm run login
+npm run dev          # Start development on Reddit
+```
 
 ## Commands
 
-- `npm run dev`: Starts a development server where you can develop your application live on Reddit.
-- `npm run build`: Builds your client and server projects
-- `npm run deploy`: Uploads a new version of your app
-- `npm run launch`: Publishes your app for review
-- `npm run login`: Logs your CLI into Reddit
-- `npm run type-check`: Type checks, lints, and prettifies your app
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start dev server on Reddit |
+| `npm run build` | Build client + server |
+| `npm run type-check` | TypeScript strict check |
+| `npm run lint` | ESLint |
+| `npm run test` | Vitest unit tests (36 tests) |
+| `npm run deploy` | Full deploy pipeline |
+
+## Project Structure
+
+```
+src/
+├── client/          # React frontend (dashboard)
+├── server/          # Hono backend
+│   ├── routes/      # API and trigger endpoints
+│   ├── triggers/    # Event handlers (PostCreate, CommentCreate)
+│   ├── services/    # Business logic
+│   ├── scoring/     # Detection engine
+│   └── storage/     # KV wrapper
+├── shared/          # Types, utilities, constants
+tools/               # Burst simulation script
+docs/                # Documentation
+```
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Low-Level Design](docs/LLD.md)
+- [Requirements](docs/SRS.md)
+- [Development Guide](docs/DEVELOPMENT.md)
+- [Deployment Guide](docs/DEPLOYMENT.md)
+- [Testing Strategy](docs/TESTING.md)
+- [Demo Plan](docs/DEMO_PLAN.md)
+- [Submission Checklist](docs/HACKATHON_CHECKLIST.md)
+
+## Tech Stack
+
+- **Runtime:** Devvit (Reddit's serverless platform)
+- **Backend:** Hono + TypeScript (strict mode)
+- **Frontend:** React 19 + Tailwind CSS 4
+- **Storage:** Devvit KV (Redis)
+- **Testing:** Vitest (36 unit tests)
+- **No external servers or databases**
+
+## License
+
+BSD-3-Clause
