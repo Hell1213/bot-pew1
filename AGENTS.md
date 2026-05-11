@@ -37,6 +37,9 @@ You are writing a Devvit web application that will be executed on Reddit.com.
 - `npm run type-check`: Check typescript types
 - `npm run lint`: Check the linter
 - `npm run test -- my-file-name`: Run tests isolated to a file
+- `npm run build`: Build client + server (required before playtest)
+- `npx devvit playtest <subreddit>`: Push build to test subreddit for live testing
+- `npm run deploy`: Full pipeline (type-check + lint + test + upload)
 
 ## Code Style
 
