@@ -10,6 +10,8 @@ export type ActivityEvent = {
   readonly postKarma: number;
   readonly commentKarma: number;
   readonly isNewAccount: boolean;
+  readonly hasVerifiedEmail: boolean;
+  readonly isMod: boolean;
 };
 
 export type AccountFingerprint = {
@@ -36,7 +38,35 @@ export type BurstResult = {
 
 export type AlertType = 'burst' | 'brigade' | 'ban_evasion' | 'spam_raid';
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
-export type RecommendedAction = 'none' | 'watch' | 'restrict' | 'lock';
+
+export type ModAction =
+  | 'acknowledge'
+  | 'dismiss'
+  | 'monitor'
+  | 'investigate'
+  | 'escalate';
+
+export type ModActionEntry = {
+  action: ModAction;
+  by: string;
+  at: number;
+};
+
+export type ExplainabilityData = {
+  burstAnomalyScore: number;
+  burstZScore: number;
+  clusterConfidence: number;
+  clusterCount: number;
+  suspiciousAccountRatio: number;
+  temporalAnomaly: boolean;
+  scoringComposition: {
+    burstWeight: number;
+    newAccountWeight: number;
+    fingerprintWeight: number;
+    clusterWeight: number;
+  };
+  summary: string;
+};
 
 export type AlertPayload = {
   readonly id: string;
@@ -49,9 +79,44 @@ export type AlertPayload = {
   readonly relatedComments: readonly string[];
   readonly score: number;
   readonly timestamp: number;
-  readonly dismissed: boolean;
-  readonly dismissedAt?: number;
-  readonly dismissedBy?: string;
+  readonly actionHistory: readonly ModActionEntry[];
+  readonly explainability?: ExplainabilityData;
+};
+
+export type ConfigPreset = 'conservative' | 'balanced' | 'aggressive';
+
+export const CONFIG_PRESETS: Record<ConfigPreset, {
+  burstThreshold: number;
+  similarityThreshold: number;
+  windowMinutes: number;
+  cooldownMinutes: number;
+  label: string;
+  description: string;
+}> = {
+  conservative: {
+    burstThreshold: 5,
+    similarityThreshold: 0.85,
+    windowMinutes: 10,
+    cooldownMinutes: 30,
+    label: 'Conservative',
+    description: 'Fewer alerts, higher confidence required. Best for large subreddits.',
+  },
+  balanced: {
+    burstThreshold: 3,
+    similarityThreshold: 0.75,
+    windowMinutes: 5,
+    cooldownMinutes: 15,
+    label: 'Balanced',
+    description: 'Moderate sensitivity for most communities.',
+  },
+  aggressive: {
+    burstThreshold: 1.5,
+    similarityThreshold: 0.6,
+    windowMinutes: 3,
+    cooldownMinutes: 10,
+    label: 'Aggressive',
+    description: 'Maximum detection. May produce more false positives.',
+  },
 };
 
 export type SubredditConfig = {
@@ -70,5 +135,16 @@ export type SubredditRisk = {
   readonly uniqueUsersFlagged: number;
   readonly averageSeverity: number;
   readonly topReasonCodes: readonly string[];
-  readonly recommendedAction: RecommendedAction;
+  readonly recommendedAction: string;
+};
+
+export type DemoScenario = 'normal' | 'spam_wave' | 'coordinated_raid' | 'suspicious_swarm' | 'reset';
+
+export type DashboardStats = {
+  activeAlerts: number;
+  criticalAlerts: number;
+  totalUsersFlagged: number;
+  eventsProcessed: number;
+  lastScoredAt: number | null;
+  systemActive: boolean;
 };

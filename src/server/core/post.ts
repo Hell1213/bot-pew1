@@ -1,7 +1,7 @@
 import { reddit } from '@devvit/web/server';
 
-export const createPost = async () => {
+export const createModSignalPost = async () => {
   return await reddit.submitCustomPost({
-    title: 'bot-pew1',
+    title: 'ModSignal Dashboard',
   });
 };

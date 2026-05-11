@@ -1,35 +1,36 @@
-import type { ActivityEvent, BurstResult } from '../../shared/dto/modsignal';
-import { zScore } from '../../shared/utils/stats';
+import type { ActivityEvent } from '../../shared/dto/modsignal';
+import { zScore, computeBaseline } from '../../shared/utils/stats';
+
+export type BurstDetectionResult = {
+  readonly isBurst: boolean;
+  readonly zScore: number;
+  readonly eventCount: number;
+  readonly newAccountCount: number;
+  readonly newAccountRatio: number;
+  readonly reasonCodes: readonly string[];
+};
 
 export const detectBurst = (
   events: readonly ActivityEvent[],
-  baselineMean: number,
-  baselineStddev: number,
-  threshold = 3.0,
-): BurstResult => {
+  baselineCounts: readonly number[],
+  threshold: number,
+  newAccountRatioThreshold: number = 0.3
+): BurstDetectionResult => {
   const eventCount = events.length;
-  const newAccountEvents = events.filter((e) => e.isNewAccount);
-  const newAccountCount = newAccountEvents.length;
+  const newAccounts = events.filter((e) => e.isNewAccount);
+  const newAccountCount = newAccounts.length;
   const newAccountRatio = eventCount > 0 ? newAccountCount / eventCount : 0;
 
-  const score = zScore(eventCount, baselineMean, baselineStddev);
+  const { mean, stdDev } = computeBaseline(baselineCounts);
+  const z = zScore(eventCount, mean, stdDev);
+
   const reasonCodes: string[] = [];
-
-  if (score > threshold) {
-    reasonCodes.push('high_z_score');
-  }
-
-  if (newAccountRatio > 0.5) {
-    reasonCodes.push('new_account_surge');
-  }
-
-  if (eventCount > baselineMean + baselineStddev * 2) {
-    reasonCodes.push('volume_spike');
-  }
+  if (z > threshold) reasonCodes.push('burst_z_score');
+  if (newAccountRatio > newAccountRatioThreshold) reasonCodes.push('high_new_account_ratio');
 
   return {
     isBurst: reasonCodes.length > 0,
-    zScore: score,
+    zScore: z,
     eventCount,
     newAccountCount,
     newAccountRatio,

@@ -1,75 +1,69 @@
 import type { ActivityEvent, AccountFingerprint } from '../../shared/dto/modsignal';
 
-const FEATURE_COUNT = 7;
+const clamp = (v: number, min: number, max: number): number =>
+  Math.max(min, Math.min(max, v));
 
-const normalize = (value: number, min: number, max: number): number => {
-  if (max === min) return 0;
-  return (value - min) / (max - min);
-};
-
-export const buildFeatureVector = (events: readonly ActivityEvent[]): number[] => {
-  if (events.length === 0) {
-    return new Array(FEATURE_COUNT).fill(0);
-  }
-
-  const now = Date.now();
-  const accountAgeDays = (now - events[0]!.accountCreatedAt) / (1000 * 60 * 60 * 24);
-
-  const maxKarma = Math.max(...events.map((e) => Math.max(e.postKarma, e.commentKarma)), 1);
-  const avgPostKarma = events.reduce((s, e) => s + e.postKarma, 0) / events.length;
-  const avgCommentKarma = events.reduce((s, e) => s + e.commentKarma, 0) / events.length;
-
-  const uniqueSubreddits = new Set(events.map((e) => e.subreddit)).size;
-  const newAccountCount = events.filter((e) => e.isNewAccount).length;
-
-  return [
-    normalize(accountAgeDays, 0, 3650),
-    normalize(avgPostKarma, 0, maxKarma),
-    normalize(avgCommentKarma, 0, maxKarma),
-    normalize(events.filter((e) => e.type === 'post').length, 0, events.length),
-    normalize(events.filter((e) => e.type === 'comment').length, 0, events.length),
-    normalize(uniqueSubreddits, 0, 50),
-    normalize(newAccountCount, 0, events.length),
-  ];
-};
-
-export const computeAccountFingerprint = (
-  userId: string,
+export const extractFingerprint = (
   events: readonly ActivityEvent[],
-): AccountFingerprint => {
-  if (events.length === 0) {
-    return {
-      userId,
-      username: 'unknown',
-      accountAgeDays: 0,
-      karmaScore: 0,
-      postFrequency: 0,
-      commentFrequency: 0,
-      uniqueSubreddits: 0,
-      hasVerifiedEmail: false,
-      isMod: false,
-      featureVector: new Array(FEATURE_COUNT).fill(0),
-    };
-  }
+  userId: string,
+  now: number
+): AccountFingerprint | undefined => {
+  const userEvents = events.filter((e) => e.userId === userId);
+  if (userEvents.length === 0) return undefined;
 
-  const now = Date.now();
-  const accountAgeDays = (now - events[0]!.accountCreatedAt) / (1000 * 60 * 60 * 24);
+  const first = userEvents[0]!;
+  const accountAgeDays = (now - first.accountCreatedAt) / (1000 * 60 * 60 * 24);
+  const avgKarma = (first.postKarma + first.commentKarma) / 2;
+  const posts = userEvents.filter((e) => e.type === 'post').length;
+  const comments = userEvents.filter((e) => e.type === 'comment').length;
+  const uniqueSubs = new Set(userEvents.map((e) => e.subreddit)).size;
 
-  const totalKarma = events.reduce((s, e) => s + e.postKarma + e.commentKarma, 0);
-  const postCount = events.filter((e) => e.type === 'post').length;
-  const commentCount = events.filter((e) => e.type === 'comment').length;
-  const uniqueSubreddits = new Set(events.map((e) => e.subreddit)).size;
+  const vector: number[] = [
+    clamp(accountAgeDays / 365, 0, 1),
+    clamp(avgKarma / 10000, 0, 1),
+    clamp(posts / 50, 0, 1),
+    clamp(comments / 100, 0, 1),
+    clamp(uniqueSubs / 20, 0, 1),
+    first.isNewAccount ? 1 : 0,
+    first.hasVerifiedEmail ? 1 : 0,
+  ];
 
   return {
     userId,
-    username: events[0]!.username,
-    accountAgeDays,
-    karmaScore: totalKarma,
-    postFrequency: postCount,
-    commentFrequency: commentCount,
-    uniqueSubreddits,
-    hasVerifiedEmail: false,
-    isMod: false,
-    featureVector: buildFeatureVector(events),
+    username: first.username,
+    accountAgeDays: Math.round(accountAgeDays * 100) / 100,
+    karmaScore: Math.round(avgKarma),
+    postFrequency: posts,
+    commentFrequency: comments,
+    uniqueSubreddits: uniqueSubs,
+    hasVerifiedEmail: first.hasVerifiedEmail ?? true,
+    isMod: first.isMod ?? false,
+    featureVector: vector,
   };
+};
+
+export const cosineSimilarity = (
+  a: readonly number[],
+  b: readonly number[]
+): number => {
+  if (a.length !== b.length) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    normA += a[i]! * a[i]!;
+    normB += b[i]! * b[i]!;
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+};
+
+export const jaccardSimilarity = (
+  a: readonly string[],
+  b: readonly string[]
+): number => {
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const intersection = new Set([...setA].filter((x) => setB.has(x)));
+  const union = new Set([...setA, ...setB]);
+  return union.size === 0 ? 0 : intersection.size / union.size;
 };

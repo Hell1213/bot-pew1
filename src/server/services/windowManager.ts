@@ -1,68 +1,90 @@
 import type { ActivityEvent } from '../../shared/dto/modsignal';
-import { bucketKey, now } from '../../shared/utils/time';
+import { bucketKey, getWindowBounds, BUCKET_SIZE_MS } from '../../shared/utils/time';
 import { Welford } from '../../shared/utils/stats';
-import { KEY_WINDOW } from '../../shared/constants/kvKeys';
 import type { KVStore } from '../storage/kvStore';
+import { kvKeys } from '../../shared/constants/kvKeys';
 
-export interface WindowManager {
-  recordEvent(event: ActivityEvent): Promise<void>;
-  getWindow(subreddit: string, bucketTimestamp: number): Promise<ActivityEvent[]>;
-  getActiveWindowEvents(subreddit: string, windowMinutes?: number): Promise<ActivityEvent[]>;
-  computeBaseline(subreddit: string, lookbackMinutes: number, windowMinutes?: number): Promise<{ mean: number; stddev: number; count: number }>;
-  pruneOldBuckets(subreddit: string, retentionMinutes: number, windowMinutes?: number): Promise<void>;
-}
+export class WindowManager {
+  constructor(
+    private readonly kv: KVStore,
+    private readonly subreddit: string,
+    private readonly windowMinutes: number = 5
+  ) {}
 
-export const createWindowManager = (store: KVStore): WindowManager => ({
   async recordEvent(event: ActivityEvent): Promise<void> {
-    const bk = bucketKey(event.timestamp, 5);
-    const key = KEY_WINDOW(event.subreddit, bk);
-    const existing = await store.getJSON<ActivityEvent[]>(key);
-    const events = existing ?? [];
-    events.push(event);
-    await store.setJSON(key, events);
-  },
+    const bucket = bucketKey(event.timestamp, BUCKET_SIZE_MS);
+    const key = kvKeys.bucketEvents(this.subreddit, bucket);
 
-  async getWindow(subreddit: string, bucketTimestamp: number): Promise<ActivityEvent[]> {
-    const key = KEY_WINDOW(subreddit, bucketTimestamp);
-    const events = await store.getJSON<ActivityEvent[]>(key);
-    return events ?? [];
-  },
+    await this.kv.sortedAdd(
+      key,
+      event.timestamp,
+      JSON.stringify(event)
+    );
 
-  async getActiveWindowEvents(subreddit: string, windowMinutes = 5): Promise<ActivityEvent[]> {
-    const nowBucket = bucketKey(now(), windowMinutes);
-    const prevBucket = bucketKey(nowBucket - 1, windowMinutes);
-    const [current, previous] = await Promise.all([
-      store.getJSON<ActivityEvent[]>(KEY_WINDOW(subreddit, nowBucket)),
-      store.getJSON<ActivityEvent[]>(KEY_WINDOW(subreddit, prevBucket)),
-    ]);
-    return [...(previous ?? []), ...(current ?? [])];
-  },
+    await this.kv.expire(key, this.windowMinutes * 60 * 2);
+  }
 
-  async computeBaseline(subreddit: string, lookbackMinutes: number, windowMinutes = 5): Promise<{ mean: number; stddev: number; count: number }> {
-    const cutoff = now() - lookbackMinutes * 60 * 1000;
-    const welford = new Welford();
-    let earliest = bucketKey(now(), windowMinutes);
+  async getCurrentWindowEvents(): Promise<readonly ActivityEvent[]> {
+    const now = Date.now();
+    const { start } = getWindowBounds(now, this.windowMinutes);
 
-    while (earliest > cutoff) {
-      const key = KEY_WINDOW(subreddit, earliest);
-      const events = await store.getJSON<ActivityEvent[]>(key);
-      if (events) {
-        welford.update(events.length);
+    const startBucket = bucketKey(start, BUCKET_SIZE_MS);
+    const endBucket = bucketKey(now, BUCKET_SIZE_MS);
+
+    const startNum = parseInt(startBucket);
+    const endNum = parseInt(endBucket);
+    const results: ActivityEvent[] = [];
+
+    for (let t = startNum; t <= endNum; t += BUCKET_SIZE_MS) {
+      const key = kvKeys.bucketEvents(this.subreddit, t.toString());
+      const members = await this.kv.sortedRange(key, 0, -1);
+      if (members.length > 0) {
+        for (const { member } of members) {
+          try {
+            const event = JSON.parse(member) as ActivityEvent;
+            if (event.timestamp >= start) {
+              results.push(event);
+            }
+          } catch {
+            // skip malformed event
+          }
+        }
       }
-      earliest -= windowMinutes * 60 * 1000;
     }
 
-    return { mean: welford.mean, stddev: welford.stddev, count: welford.n };
-  },
+    return results;
+  }
 
-  async pruneOldBuckets(subreddit: string, retentionMinutes: number, windowMinutes = 5): Promise<void> {
-    const cutoff = now() - retentionMinutes * 60 * 1000;
-    const oldestPossible = bucketKey(now(), windowMinutes);
-    let bucket = bucketKey(cutoff, windowMinutes);
+  async getHistoricalCounts(hours: number = 24): Promise<readonly number[]> {
+    const now = Date.now();
+    const lookback = hours * 60 * 60 * 1000;
+    const counts: number[] = [];
+    const running = new Welford();
+    const startBucket = bucketKey(now - lookback, BUCKET_SIZE_MS);
+    const endBucket = bucketKey(now, BUCKET_SIZE_MS);
 
-    while (bucket < oldestPossible) {
-      await store.delete(KEY_WINDOW(subreddit, bucket));
-      bucket += windowMinutes * 60 * 1000;
+    const startNum = parseInt(startBucket);
+    const endNum = parseInt(endBucket);
+
+    for (let t = startNum; t <= endNum; t += BUCKET_SIZE_MS) {
+      const key = kvKeys.bucketEvents(this.subreddit, t.toString());
+      const count = await this.kv.sortedCard(key);
+      counts.push(count);
+      running.update(count);
     }
-  },
-});
+
+    return counts;
+  }
+
+  async pruneOldBuckets(retentionHours: number = 48): Promise<void> {
+    const now = Date.now();
+    const cutoff = now - retentionHours * 60 * 60 * 1000;
+    const cutoffBucket = bucketKey(cutoff, BUCKET_SIZE_MS);
+    const cutoffNum = parseInt(cutoffBucket);
+
+    for (let t = 0; t < cutoffNum; t += BUCKET_SIZE_MS) {
+      const key = kvKeys.bucketEvents(this.subreddit, t.toString());
+      await this.kv.del(key);
+    }
+  }
+}

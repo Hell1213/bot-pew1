@@ -1,53 +1,50 @@
-import type { AlertPayload, SubredditRisk } from '../../shared/dto/modsignal';
+import type {
+  SubredditRisk,
+  AlertPayload,
+} from '../../shared/dto/modsignal';
 
-export const aggregateRisk = (alerts: readonly AlertPayload[]): SubredditRisk => {
-  if (alerts.length === 0) {
-    return {
-      subreddit: '',
-      totalAlertCount: 0,
-      uniqueUsersFlagged: 0,
-      averageSeverity: 0,
-      topReasonCodes: [],
-      recommendedAction: 'none',
-    };
-  }
+export const aggregateRisk = (
+  alerts: readonly AlertPayload[]
+): SubredditRisk | undefined => {
+  if (alerts.length === 0) return undefined;
 
-  const subreddit = alerts[0]!.subreddit;
-  const uniqueUsersFlagged = new Set(
-    alerts.flatMap((a) => a.affectedUsers.map((u) => u.userId)),
-  ).size;
-
-  const severityMap: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
-  const totalSeverity = alerts.reduce((s, a) => s + (severityMap[a.severity] ?? 0), 0);
-  const averageSeverity = totalSeverity / alerts.length;
-
+  const uniqueUsers = new Set<string>();
   const reasonCount = new Map<string, number>();
+  let totalSeverity = 0;
+
   for (const alert of alerts) {
+    for (const user of alert.affectedUsers) {
+      uniqueUsers.add(user.userId);
+    }
     for (const code of alert.reasonCodes) {
       reasonCount.set(code, (reasonCount.get(code) ?? 0) + 1);
     }
+    const severityVal = alert.severity === 'critical' ? 4
+      : alert.severity === 'high' ? 3
+      : alert.severity === 'medium' ? 2
+      : 1;
+    totalSeverity += severityVal;
   }
-  const topReasonCodes = [...reasonCount.entries()]
+
+  const avgSeverity = alerts.length > 0 ? totalSeverity / alerts.length : 0;
+  const sortedReasons = [...reasonCount.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
     .map(([code]) => code);
 
-  let recommendedAction: SubredditRisk['recommendedAction'] = 'none';
+  let recommendedAction = 'none';
+  const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
+  const highCount = alerts.filter((a) => a.severity === 'high').length;
 
-  if (alerts.some((a) => a.severity === 'critical')) {
-    recommendedAction = 'lock';
-  } else if (alerts.some((a) => a.severity === 'high') || alerts.length >= 3) {
-    recommendedAction = 'restrict';
-  } else if (alerts.length >= 1) {
-    recommendedAction = 'watch';
-  }
+  if (criticalCount >= 3) recommendedAction = 'lock';
+  else if (criticalCount >= 1 || highCount >= 3) recommendedAction = 'restrict';
+  else if (highCount >= 1 || alerts.length >= 5) recommendedAction = 'watch';
 
   return {
-    subreddit,
+    subreddit: alerts[0]!.subreddit,
     totalAlertCount: alerts.length,
-    uniqueUsersFlagged,
-    averageSeverity,
-    topReasonCodes,
+    uniqueUsersFlagged: uniqueUsers.size,
+    averageSeverity: Math.round(avgSeverity * 100) / 100,
+    topReasonCodes: sortedReasons,
     recommendedAction,
   };
 };

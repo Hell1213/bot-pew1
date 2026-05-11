@@ -1,46 +1,67 @@
 import type { AlertPayload } from '../../shared/dto/modsignal';
 import { reddit } from '@devvit/web/server';
 
-const SEVERITY_ICONS: Record<string, string> = {
-  critical: '🔴 CRITICAL',
-  high: '🟠 HIGH',
-  medium: '🟡 MEDIUM',
-  low: '🔵 LOW',
-};
-
-export interface AlertDispatcher {
-  dispatchAlert(alert: AlertPayload): Promise<void>;
-}
-
-export const createAlertDispatcher = (): AlertDispatcher => ({
-  async dispatchAlert(alert: AlertPayload): Promise<void> {
+export class AlertDispatcher {
+  async dispatch(alert: AlertPayload): Promise<string | undefined> {
     try {
-      if (alert.relatedPosts.length === 0) return;
+      const severityEmoji = alert.severity === 'critical' ? '🚨' : alert.severity === 'high' ? '⚠️' : alert.severity === 'medium' ? '🔶' : '🔵';
+      const bullet = (text: string) => `• ${text}`;
 
       const lines: string[] = [
-        `⚠️ **ModSignal Alert: ${alert.type.toUpperCase()}**`,
+        `## ${severityEmoji} ModSignal Alert: ${alert.severity.toUpperCase()} — ${alert.type.replace(/_/g, ' ')}`,
         '',
-        `**Severity:** ${SEVERITY_ICONS[alert.severity] ?? alert.severity}`,
-        `**Score:** ${alert.score}/100`,
-        `**Affected Users:** ${alert.affectedUsers.length}`,
-        `**Time:** ${new Date(alert.timestamp).toISOString()}`,
+        `**Risk Score:** ${alert.score}/100 | **Confidence:** ${alert.score}%`,
+        `**Users Flagged:** ${alert.affectedUsers.length}`,
+        `**Related Posts:** ${alert.relatedPosts.length} | **Related Comments:** ${alert.relatedComments.length}`,
         '',
-        '**Reason Codes:**',
-        ...alert.reasonCodes.map((c) => `- \`${c}\``),
+        '**Why this was detected:**',
+        ...(alert.explainability
+          ? [
+              bullet(`Burst anomaly: ${Math.round(alert.explainability.burstAnomalyScore)}% (z-score: ${alert.explainability.burstZScore.toFixed(2)})`),
+              bullet(`Coordinated clusters: ${alert.explainability.clusterCount} (confidence: ${Math.round(alert.explainability.clusterConfidence)}%)`),
+              bullet(`Suspicious account ratio: ${Math.round(alert.explainability.suspiciousAccountRatio * 100)}%`),
+              bullet(`Temporal anomaly: ${alert.explainability.temporalAnomaly ? 'Yes' : 'No'}`),
+              '',
+              `*${alert.explainability.summary}*`,
+            ]
+          : []),
         '',
+        '**Reason codes:**',
+        ...alert.reasonCodes.map((c) => bullet(`\`${c}\``)),
+        '',
+        ...(alert.affectedUsers.length > 0
+          ? [
+              '',
+              '**Flagged users:**',
+              ...alert.affectedUsers.slice(0, 20).map(
+                (u) => bullet(`u/${u.username} (age: ${u.accountAgeDays.toFixed(0)}d, karma: ${u.karmaScore})`)
+              ),
+              ...(alert.affectedUsers.length > 20 ? [bullet(`… and ${alert.affectedUsers.length - 20} more`)] : []),
+              '',
+            ]
+          : []),
         '---',
-        '🤖 ModSignal v1.0 — Use the dashboard to dismiss this alert.',
+        '',
+        '**Recommended action:** Moderators can acknowledge, monitor, investigate, escalate, or dismiss this alert from the ModSignal dashboard.',
+        '',
+        '*This is an automated alert from ModSignal. Alerts are re-evaluated every 5 minutes.*',
       ];
 
       const body = lines.join('\n');
-      const postId = alert.relatedPosts[0] as unknown as `t3_${string}`;
+      const postId = alert.relatedPosts[0];
+      if (!postId) return undefined;
 
-      await reddit.submitComment({
-        id: postId,
+      const comment = await reddit.submitComment({
+        id: postId as `t3_${string}`,
         text: body,
       });
+
+      await comment.distinguish(true);
+
+      return comment.id;
     } catch (error) {
-      console.error('[AlertDispatcher]', error);
+      console.error('AlertDispatcher: Failed to dispatch alert', error);
+      return undefined;
     }
-  },
-});
+  }
+}

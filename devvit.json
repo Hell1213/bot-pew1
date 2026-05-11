@@ -20,8 +20,8 @@
   "menu": {
     "items": [
       {
-        "label": "ModSignal Dashboard",
-        "description": "Open the ModSignal moderation dashboard",
+        "label": "Create ModSignal Dashboard",
+        "description": "Create a new ModSignal dashboard post",
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/post-create"
@@ -41,11 +41,12 @@
     "onCommentCreate": "/internal/triggers/on-comment-create",
     "onCronTick": "/internal/triggers/on-cron-tick"
   },
-  "scripts": {
-    "dev": "vite build --watch",
-    "build": "vite build"
-  },
-  "dev": {
-    "subreddit": "bot_pew1_dev"
+  "scheduler": {
+    "tasks": {
+      "modsignal-scoring": {
+        "endpoint": "/internal/triggers/scheduler",
+        "cron": "*/5 * * * *"
+      }
+    }
   }
 }

@@ -1,127 +1,126 @@
 import { Hono } from 'hono';
-import { context, redis, reddit } from '@devvit/web/server';
-import type { InitResponse, IncrementResponse, DecrementResponse } from '../../shared/api';
+import { context } from '@devvit/web/server';
 import type { SubredditConfig } from '../../shared/dto/modsignal';
-import { kvStore } from '../storage/kvStore';
-import { createPersistenceService } from '../services/persistenceService';
-import { createSettingsService } from '../services/settings';
-import { aggregateRisk } from '../scoring/riskAggregator';
-
-type ErrorResponse = { status: 'error'; message: string };
+import { createKVStore } from '../storage/kvStore';
+import { PersistenceService } from '../services/persistenceService';
+import { SettingsService } from '../services/settings';
+import { WindowManager } from '../services/windowManager';
+import { ScoringOrchestrator } from '../services/scoringOrchestrator';
 
 export const api = new Hono();
-const persistence = createPersistenceService(kvStore);
-const settings = createSettingsService(kvStore);
 
-api.get('/init', async (c) => {
-  const { postId } = context;
-  if (!postId) {
-    return c.json<ErrorResponse>({ status: 'error', message: 'postId required' }, 400);
-  }
-  try {
-    const [count, username] = await Promise.all([
-      redis.get('count'),
-      reddit.getCurrentUsername(),
-    ]);
-    return c.json<InitResponse>({
-      type: 'init', postId, count: count ? parseInt(count) : 0, username: username ?? 'anonymous',
-    });
-  } catch (error) {
-    console.error('[API] Init error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Init failed' }, 400);
-  }
-});
-
-api.post('/increment', async (c) => {
-  const { postId } = context;
-  if (!postId) return c.json<ErrorResponse>({ status: 'error', message: 'postId required' }, 400);
-  const count = await redis.incrBy('count', 1);
-  return c.json<IncrementResponse>({ count, postId, type: 'increment' });
-});
-
-api.post('/decrement', async (c) => {
-  const { postId } = context;
-  if (!postId) return c.json<ErrorResponse>({ status: 'error', message: 'postId required' }, 400);
-  const count = await redis.incrBy('count', -1);
-  return c.json<DecrementResponse>({ count, postId, type: 'decrement' });
-});
+const getSubreddit = (): string | undefined => context.subredditName;
+const getStore = () => {
+  const subreddit = getSubreddit();
+  if (!subreddit) return undefined;
+  const kv = createKVStore();
+  return {
+    persistence: new PersistenceService(kv, subreddit),
+    settings: new SettingsService(kv, subreddit),
+  };
+};
 
 api.get('/alerts', async (c) => {
-  try {
-    const subreddit = context.subredditName;
-    const includeDismissed = c.req.query('includeDismissed') === 'true';
-    if (!subreddit) return c.json<ErrorResponse>({ status: 'error', message: 'No subreddit' }, 400);
-    const alerts = await persistence.listAlerts(subreddit, includeDismissed);
-    return c.json({ alerts });
-  } catch (error) {
-    console.error('[API] alerts error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Failed' }, 400);
-  }
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const alerts = await store.persistence.getAlerts();
+  return c.json({ alerts });
 });
 
-api.get('/alerts/:alertId', async (c) => {
-  try {
-    const alert = await persistence.getAlert(c.req.param('alertId'));
-    if (!alert) return c.json<ErrorResponse>({ status: 'error', message: 'Not found' }, 404);
-    return c.json(alert);
-  } catch (error) {
-    console.error('[API] alert detail error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Failed' }, 400);
+api.post('/alerts/:id/action', async (c) => {
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const alertId = c.req.param('id');
+  const { action, by } = await c.req.json<{ action: string; by: string }>();
+  const validActions = ['acknowledge', 'dismiss', 'monitor', 'investigate', 'escalate'];
+  if (!validActions.includes(action)) {
+    return c.json({ error: `Invalid action. Must be one of: ${validActions.join(', ')}` }, 400);
   }
+  const updated = await store.persistence.addAction(alertId, action as 'acknowledge' | 'dismiss' | 'monitor' | 'investigate' | 'escalate', by ?? 'mod');
+  if (!updated) return c.json({ error: 'Alert not found' }, 404);
+  return c.json({ alert: updated });
 });
 
-api.post('/alerts/:alertId/dismiss', async (c) => {
-  try {
-    const { dismissedBy } = await c.req.json<{ dismissedBy: string }>();
-    await persistence.dismissAlert(c.req.param('alertId'), dismissedBy);
+api.post('/alerts/:id/dismiss', async (c) => {
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const alertId = c.req.param('id');
+  const { dismissedBy } = await c.req.json<{ dismissedBy: string }>();
+  await store.persistence.dismissAlert(alertId, dismissedBy ?? 'mod');
+  const alerts = await store.persistence.getAlerts();
+  return c.json({ alerts });
+});
 
-    const alert = await persistence.getAlert(c.req.param('alertId'));
-    if (alert) {
-      const config = await settings.getOrCreateConfig(alert.subreddit);
-      await settings.updateConfig(alert.subreddit, settings.autoTune(config, true));
-    }
-
-    return c.json({ status: 'dismissed' });
-  } catch (error) {
-    console.error('[API] dismiss error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Failed' }, 400);
-  }
+api.get('/alerts/:id', async (c) => {
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const alert = await store.persistence.getAlert(c.req.param('id'));
+  if (!alert) return c.json({ error: 'Alert not found' }, 404);
+  return c.json({ alert });
 });
 
 api.get('/config', async (c) => {
-  try {
-    const subreddit = context.subredditName;
-    if (!subreddit) return c.json<ErrorResponse>({ status: 'error', message: 'No subreddit' }, 400);
-    const config = await settings.getOrCreateConfig(subreddit);
-    return c.json(config);
-  } catch (error) {
-    console.error('[API] config error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Failed' }, 400);
-  }
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const config = await store.settings.getConfig();
+  return c.json(config);
 });
 
 api.post('/config', async (c) => {
-  try {
-    const subreddit = context.subredditName;
-    if (!subreddit) return c.json<ErrorResponse>({ status: 'error', message: 'No subreddit' }, 400);
-    const body = await c.req.json<Partial<SubredditConfig>>();
-    const updated = await settings.updateConfig(subreddit, body);
-    return c.json(updated);
-  } catch (error) {
-    console.error('[API] config update error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Failed' }, 400);
-  }
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const updates = await c.req.json<Partial<SubredditConfig>>();
+  const config = await store.settings.updateConfig(updates);
+  return c.json(config);
 });
 
 api.get('/stats', async (c) => {
-  try {
-    const subreddit = context.subredditName;
-    if (!subreddit) return c.json<ErrorResponse>({ status: 'error', message: 'No subreddit' }, 400);
-    const alerts = await persistence.listAlerts(subreddit);
-    const risk = aggregateRisk(alerts);
-    return c.json(risk);
-  } catch (error) {
-    console.error('[API] stats error:', error);
-    return c.json<ErrorResponse>({ status: 'error', message: 'Failed' }, 400);
+  const store = getStore();
+  if (!store) return c.json({ error: 'No subreddit' }, 400);
+  const stats = await store.persistence.getStats();
+  return c.json(stats);
+});
+
+api.post('/demo', async (c) => {
+  const subreddit = getSubreddit();
+  if (!subreddit) return c.json({ error: 'No subreddit' }, 400);
+  const { scenario } = await c.req.json<{ scenario: string }>();
+  const kv = createKVStore();
+  const wm = new WindowManager(kv, subreddit, 5);
+  const persistence = new PersistenceService(kv, subreddit);
+
+  if (scenario === 'reset') {
+    await persistence.clearAlerts();
+    return c.json({ status: 'reset', message: 'All alerts cleared' });
   }
+
+  const now = Date.now();
+  const eventCount = scenario === 'spam_wave' ? 80 : scenario === 'coordinated_raid' ? 40 : scenario === 'suspicious_swarm' ? 60 : 10;
+  const isCoordinated = scenario === 'coordinated_raid' || scenario === 'suspicious_swarm';
+  const userIdCount = scenario === 'coordinated_raid' ? 4 : scenario === 'suspicious_swarm' ? 15 : 20;
+
+  for (let i = 0; i < eventCount; i++) {
+    const uid = isCoordinated ? `demo_u_${i % userIdCount}` : `demo_normal_${i}`;
+    await wm.recordEvent({
+      type: i % 3 === 0 ? 'post' : 'comment',
+      userId: uid,
+      username: uid,
+      subreddit,
+      postId: `demo_post_${i}`,
+      commentId: i % 3 !== 0 ? `demo_comment_${i}` : undefined,
+      timestamp: now - i * 2000,
+      accountCreatedAt: isCoordinated ? now - 2 * 86400000 : now - Math.random() * 365 * 86400000,
+      postKarma: isCoordinated ? 5 : Math.floor(Math.random() * 5000),
+      commentKarma: isCoordinated ? 3 : Math.floor(Math.random() * 10000),
+      isNewAccount: isCoordinated,
+      hasVerifiedEmail: !isCoordinated,
+      isMod: false,
+    });
+  }
+
+  const events = await wm.getCurrentWindowEvents();
+  const orchestrator = new ScoringOrchestrator(wm, persistence, subreddit);
+  const alerts = await orchestrator.runPipeline(events);
+
+  return c.json({ status: 'simulated', scenario, eventsGenerated: eventCount, alertsCreated: alerts.length });
 });

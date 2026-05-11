@@ -1,83 +1,110 @@
-import type { AlertPayload, AccountFingerprint } from '../../shared/dto/modsignal';
-import { now } from '../../shared/utils/time';
-import type { WindowManager } from './windowManager';
-import type { PersistenceService } from './persistenceService';
-import type { SettingsService } from './settings';
+import type { ActivityEvent, AlertPayload, ExplainabilityData } from '../../shared/dto/modsignal';
 import { detectBurst } from '../scoring/burst';
-import { computeAccountFingerprint } from '../scoring/fingerprint';
-import { findClusters } from '../scoring/similarity';
-import { computeSuspicionScore } from '../scoring/suspicion';
+import { extractFingerprint } from '../scoring/fingerprint';
+import { agglomerativeCluster } from '../scoring/similarity';
+import { computeSuspicion } from '../scoring/suspicion';
+import { aggregateRisk } from '../scoring/riskAggregator';
+import { WindowManager } from './windowManager';
+import { PersistenceService } from './persistenceService';
 
-export interface ScoringOrchestrator {
-  runScoringCycle(subreddit: string): Promise<AlertPayload[]>;
-}
+export class ScoringOrchestrator {
+  constructor(
+    private readonly windowManager: WindowManager,
+    private readonly persistence: PersistenceService,
+    private readonly subreddit: string
+  ) {}
 
-export const createScoringOrchestrator = (
-  wm: WindowManager,
-  persistence: PersistenceService,
-  settings: SettingsService,
-): ScoringOrchestrator => ({
-  async runScoringCycle(subreddit: string): Promise<AlertPayload[]> {
-    const config = await settings.getOrCreateConfig(subreddit);
+  async runPipeline(events: readonly ActivityEvent[]): Promise<readonly AlertPayload[]> {
+    if (events.length === 0) return [];
+
+    const config = await this.persistence.getConfig();
     if (!config.enabled) return [];
 
-    const windowEvents = await wm.getActiveWindowEvents(subreddit, config.windowMinutes);
-    if (windowEvents.length === 0) return [];
-
-    const baseline = await wm.computeBaseline(subreddit, 30, config.windowMinutes);
-
+    const historicalCounts = await this.windowManager.getHistoricalCounts();
     const burstResult = detectBurst(
-      windowEvents,
-      baseline.mean,
-      baseline.stddev,
-      config.burstThreshold,
+      events,
+      historicalCounts,
+      config.burstThreshold
     );
 
-    if (!burstResult.isBurst) return [];
+    const userIds = [...new Set(events.map((e) => e.userId))];
+    const now = Date.now();
+    const fingerprints = userIds
+      .map((id) => extractFingerprint(events, id, now))
+      .filter((fp): fp is NonNullable<typeof fp> => fp !== undefined);
 
-    const userEventMap = new Map<string, typeof windowEvents>();
-    for (const event of windowEvents) {
-      const existing = userEventMap.get(event.userId) ?? [];
-      existing.push(event);
-      userEventMap.set(event.userId, existing);
+    if (fingerprints.length > 0) {
+      await this.persistence.saveFingerprints(fingerprints);
     }
 
-    const fingerprints: AccountFingerprint[] = [];
-    for (const [userId, events] of userEventMap) {
-      const fp = computeAccountFingerprint(userId, events);
-      await persistence.saveFingerprint(fp);
-      fingerprints.push(fp);
-    }
+    const clusters = agglomerativeCluster(
+      fingerprints,
+      config.similarityThreshold
+    );
 
-    const clusters = findClusters(fingerprints, config.similarityThreshold);
+    const suspicion = computeSuspicion(burstResult, fingerprints, clusters);
 
-    const alerts: AlertPayload[] = [];
-    const severityOptions = ['low', 'medium', 'high', 'critical'] as const;
+    const existingAlerts = await this.persistence.getAlerts();
+    const recentAlert = existingAlerts.find((a) => {
+      const lastAction = a.actionHistory[a.actionHistory.length - 1];
+      const isDismissed = lastAction?.action === 'dismiss';
+      return !isDismissed && Date.now() - a.timestamp < config.cooldownMinutes * 60 * 1000;
+    });
 
-    for (const cluster of clusters) {
-      const suspicionScores = cluster.map((fp) => computeSuspicionScore(fp, burstResult, 0.8));
-      const maxScore = Math.max(...suspicionScores);
-      if (maxScore < 50) continue;
+    if (suspicion.score >= 35 && !recentAlert) {
+      const largeClusters = clusters.filter((c) => c.memberIds.length >= 3);
+      const suspiciousUsers = fingerprints.filter((f) => f.karmaScore < 100);
 
-      const severityIndex = Math.min(Math.floor(maxScore / 25), 3);
-      const alert: AlertPayload = {
-        id: `alert-${now()}-${cluster[0]!.userId}`,
-        subreddit,
-        type: 'burst',
-        severity: severityOptions[severityIndex]!,
-        reasonCodes: burstResult.reasonCodes as unknown as string[],
-        affectedUsers: cluster,
-        relatedPosts: [],
-        relatedComments: [],
-        score: maxScore,
-        timestamp: now(),
-        dismissed: false,
+      const explainability: ExplainabilityData = {
+        burstAnomalyScore: burstResult.isBurst ? Math.min(burstResult.zScore / 5, 1) * 100 : 0,
+        burstZScore: burstResult.zScore,
+        clusterConfidence: fingerprints.length > 0
+          ? largeClusters.reduce((s, c) => s + c.memberIds.length, 0) / fingerprints.length * 100
+          : 0,
+        clusterCount: largeClusters.length,
+        suspiciousAccountRatio: fingerprints.length > 0 ? suspiciousUsers.length / fingerprints.length : 0,
+        temporalAnomaly: burstResult.isBurst,
+        scoringComposition: {
+          burstWeight: 35,
+          newAccountWeight: 15,
+          fingerprintWeight: 25,
+          clusterWeight: 25,
+        },
+        summary: [
+          burstResult.isBurst ? `Detected ${burstResult.eventCount} events in window (z-score: ${burstResult.zScore.toFixed(1)})` : null,
+          suspiciousUsers.length > 0 ? `${suspiciousUsers.length} accounts have low karma (<100)` : null,
+          largeClusters.length > 0 ? `${largeClusters.length} coordinated cluster(s) detected among ${fingerprints.length} users` : null,
+          burstResult.newAccountRatio > 0.3 ? `${(burstResult.newAccountRatio * 100).toFixed(0)}% of activity from new accounts` : null,
+        ].filter(Boolean).join('. ') || 'Routine monitoring activity.',
       };
 
-      await persistence.saveAlert(alert);
-      alerts.push(alert);
+      const alert: AlertPayload = {
+        id: `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        subreddit: this.subreddit,
+        type: suspicion.alertType,
+        severity: suspicion.severity,
+        reasonCodes: suspicion.reasonCodes,
+        affectedUsers: fingerprints,
+        relatedPosts: [...new Set(events.filter((e) => e.type === 'post').map((e) => e.postId))],
+        relatedComments: [...new Set(events.filter((e) => e.commentId).map((e) => e.commentId!))],
+        score: suspicion.score,
+        timestamp: Date.now(),
+        actionHistory: [],
+        explainability,
+      };
+      await this.persistence.saveAlert(alert);
+
+      const allAlerts = await this.persistence.getAlerts();
+      const risk = aggregateRisk([...allAlerts, alert]);
+      if (risk) await this.persistence.saveRisk(risk);
+
+      return [alert];
     }
 
-    return alerts;
-  },
-});
+    const allAlerts = await this.persistence.getAlerts();
+    const risk = aggregateRisk(allAlerts);
+    if (risk) await this.persistence.saveRisk(risk);
+
+    return [];
+  }
+}

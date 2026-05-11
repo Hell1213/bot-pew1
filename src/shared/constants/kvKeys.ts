@@ -1,15 +1,17 @@
-export const KEY_FINGERPRINT = (sub: string, userId: string): string =>
-  `fp:${sub}:${userId}`;
+const PREFIX = 'modsignal';
 
-export const KEY_ALERT = (sub: string, id: string): string =>
-  `alert:${sub}:${id}`;
-
-export const KEY_ALERT_LIST = (sub: string): string => `alert-list:${sub}`;
-
-export const KEY_CONFIG = (sub: string): string => `config:${sub}`;
-
-export const KEY_WINDOW = (sub: string, bucket: number): string =>
-  `window:${sub}:${bucket}`;
-
-export const KEY_WINDOW_INDEX = (sub: string): string =>
-  `window-index:${sub}`;
+export const kvKeys = {
+  subredditConfig: (subreddit: string) => `${PREFIX}:config:${subreddit}`,
+  bucketEvents: (subreddit: string, bucket: string) =>
+    `${PREFIX}:events:${subreddit}:${bucket}`,
+  alert: (subreddit: string, alertId: string) =>
+    `${PREFIX}:alert:${subreddit}:${alertId}`,
+  alertIndex: (subreddit: string) => `${PREFIX}:alerts:${subreddit}`,
+  fingerprint: (subreddit: string, userId: string) =>
+    `${PREFIX}:fp:${subreddit}:${userId}`,
+  fingerprintIndex: (subreddit: string) => `${PREFIX}:fps:${subreddit}`,
+  dismissedAlertIds: (subreddit: string) =>
+    `${PREFIX}:dismissed:${subreddit}`,
+  subredditRisk: (subreddit: string) => `${PREFIX}:risk:${subreddit}`,
+  schedulerState: (subreddit: string) => `${PREFIX}:sched:${subreddit}`,
+} as const;

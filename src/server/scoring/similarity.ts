@@ -1,73 +1,60 @@
 import type { AccountFingerprint } from '../../shared/dto/modsignal';
+import { cosineSimilarity } from './fingerprint';
 
-export const computeCosineSimilarity = (
-  a: readonly number[],
-  b: readonly number[],
-): number => {
-  if (a.length !== b.length) {
-    throw new Error('Vectors must have the same length');
-  }
-
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    const ai = a[i]!;
-    const bi = b[i]!;
-    dotProduct += ai * bi;
-    normA += ai * ai;
-    normB += bi * bi;
-  }
-
-  const magnitude = Math.sqrt(normA) * Math.sqrt(normB);
-  if (magnitude === 0) return 0;
-
-  return dotProduct / magnitude;
+export type Cluster = {
+  readonly centroid: readonly number[];
+  readonly memberIds: readonly string[];
 };
 
-export const computeJaccardSimilarity = (
-  setA: Set<string>,
-  setB: Set<string>,
-): number => {
-  const intersection = new Set([...setA].filter((x) => setB.has(x)));
-  const union = new Set([...setA, ...setB]);
+const AGGLOMERATIVE_THRESHOLD = 0.75;
 
-  if (union.size === 0) return 1;
+export const agglomerativeCluster = (
+  fingerprints: readonly AccountFingerprint[],
+  similarityThreshold: number = AGGLOMERATIVE_THRESHOLD
+): readonly Cluster[] => {
+  if (fingerprints.length === 0) return [];
+  if (fingerprints.length === 1) {
+    return [{
+      centroid: fingerprints[0]!.featureVector,
+      memberIds: [fingerprints[0]!.userId],
+    }];
+  }
 
-  return intersection.size / union.size;
-};
+  const remaining = fingerprints.map((f) => ({
+    centroid: [...f.featureVector],
+    memberIds: [f.userId],
+  }));
 
-export const findClusters = (
-  users: readonly AccountFingerprint[],
-  similarityThreshold: number,
-): AccountFingerprint[][] => {
-  const userList = [...users];
-  if (userList.length === 0) return [];
-  if (userList.length === 1) return [[userList[0]!]];
+  let merged = true;
+  while (merged) {
+    merged = false;
+    let bestI = -1, bestJ = -1;
+    let bestSim = -1;
 
-  const clusters: AccountFingerprint[][] = [[userList[0]!]];
-
-  for (let i = 1; i < userList.length; i++) {
-    const user = userList[i]!;
-    let merged = false;
-
-    for (const cluster of clusters) {
-      const hasSimilar = cluster.some(
-        (c) => computeCosineSimilarity(user.featureVector, c.featureVector) > similarityThreshold,
-      );
-
-      if (hasSimilar) {
-        cluster.push(user);
-        merged = true;
-        break;
+    for (let i = 0; i < remaining.length; i++) {
+      for (let j = i + 1; j < remaining.length; j++) {
+        const sim = cosineSimilarity(remaining[i]!.centroid, remaining[j]!.centroid);
+        if (sim > bestSim) {
+          bestSim = sim;
+          bestI = i;
+          bestJ = j;
+        }
       }
     }
 
-    if (!merged) {
-      clusters.push([user]);
+    if (bestSim >= similarityThreshold && bestI >= 0 && bestJ >= 0) {
+      const a = remaining[bestI]!;
+      const b = remaining[bestJ]!;
+      const mergedMembers = [...a.memberIds, ...b.memberIds];
+      const mergedCentroid = a.centroid.map(
+        (v, i) => (v + b.centroid[i]!) / 2
+      );
+      remaining.splice(Math.max(bestI, bestJ), 1);
+      remaining.splice(Math.min(bestI, bestJ), 1);
+      remaining.push({ centroid: mergedCentroid, memberIds: mergedMembers });
+      merged = true;
     }
   }
 
-  return clusters.filter((c) => c.length > 1);
+  return remaining;
 };

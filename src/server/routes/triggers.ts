@@ -1,66 +1,129 @@
 import { Hono } from 'hono';
-import type { OnAppInstallRequest, OnPostCreateRequest, OnCommentCreateRequest, TriggerResponse } from '@devvit/web/shared';
-import { context } from '@devvit/web/server';
-import { createPost } from '../core/post';
-import { kvStore } from '../storage/kvStore';
-import { createWindowManager } from '../services/windowManager';
-import { createPersistenceService } from '../services/persistenceService';
-import { createSettingsService } from '../services/settings';
-import { createScoringOrchestrator } from '../services/scoringOrchestrator';
-import { createAlertDispatcher } from '../services/alertDispatcher';
-import { handlePostCreate } from '../triggers/onPostCreate';
-import { handleCommentCreate } from '../triggers/onCommentCreate';
-import { handleSchedulerTick } from '../triggers/scheduler';
+import type { TriggerResponse, OnAppInstallRequest } from '@devvit/web/shared';
+import type { TaskRequest, TaskResponse } from '@devvit/web/server';
+import { context, reddit } from '@devvit/web/server';
+import { createKVStore } from '../storage/kvStore';
+import { WindowManager } from '../services/windowManager';
+import { PersistenceService } from '../services/persistenceService';
+import { ScoringOrchestrator } from '../services/scoringOrchestrator';
+import { AlertDispatcher } from '../services/alertDispatcher';
+import type { ActivityEvent } from '../../shared/dto/modsignal';
 
 export const triggers = new Hono();
-const wm = createWindowManager(kvStore);
-const persistence = createPersistenceService(kvStore);
-const settings = createSettingsService(kvStore);
-const orchestrator = createScoringOrchestrator(wm, persistence, settings);
-const dispatcher = createAlertDispatcher();
+
+const runScoring = async (subreddit: string): Promise<void> => {
+  const kv = createKVStore();
+  const windowManager = new WindowManager(kv, subreddit);
+  const persistence = new PersistenceService(kv, subreddit);
+  const orchestrator = new ScoringOrchestrator(windowManager, persistence, subreddit);
+  const dispatcher = new AlertDispatcher();
+
+  const events = await windowManager.getCurrentWindowEvents();
+  const alerts = await orchestrator.runPipeline(events);
+
+  for (const alert of alerts) {
+    await dispatcher.dispatch(alert);
+  }
+};
+
+const toActivityEvent = (
+  type: 'post' | 'comment',
+  postId: string,
+  username: string,
+): ActivityEvent => {
+  const subreddit = context.subredditName ?? 'unknown';
+
+  return {
+    type,
+    userId: username,
+    username,
+    subreddit,
+    postId,
+    commentId: type === 'comment' ? postId : undefined,
+    timestamp: Date.now(),
+    accountCreatedAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    postKarma: 0,
+    commentKarma: 0,
+    isNewAccount: false,
+    hasVerifiedEmail: true,
+    isMod: false,
+  };
+};
 
 triggers.post('/on-app-install', async (c) => {
   try {
-    const post = await createPost();
-    const input = await c.req.json<OnAppInstallRequest>();
+    await c.req.json<OnAppInstallRequest>();
+    const post = await reddit.submitCustomPost({
+      title: 'ModSignal Dashboard',
+      subredditName: context.subredditName,
+    });
+
     return c.json<TriggerResponse>({
       status: 'success',
-      message: `Post created in ${context.subredditName} with id ${post.id} (trigger: ${input.type})`,
+      message: `ModSignal installed. Post created: ${post.id}`,
     }, 200);
   } catch (error) {
-    console.error('[Trigger] onAppInstall', error);
-    return c.json<TriggerResponse>({ status: 'error', message: 'Failed' }, 400);
+    console.error('on-app-install error:', error);
+    return c.json<TriggerResponse>({
+      status: 'error',
+      message: 'Failed to install ModSignal',
+    }, 400);
   }
 });
 
 triggers.post('/on-post-create', async (c) => {
   try {
-    const input = await c.req.json<OnPostCreateRequest>();
-    await handlePostCreate(input, wm);
-    return c.json<TriggerResponse>({ status: 'success', message: 'Event recorded' }, 200);
+    const subreddit = context.subredditName;
+    if (!subreddit) {
+      return c.json({ status: 'error', message: 'No subreddit' }, 400);
+    }
+
+    const username = await reddit.getCurrentUsername();
+    const event = toActivityEvent('post', context.postId ?? '', username ?? 'unknown');
+    const kv = createKVStore();
+    const wm = new WindowManager(kv, subreddit);
+    await wm.recordEvent(event);
+
+    return c.json({ status: 'success', message: 'Post recorded' }, 200);
   } catch (error) {
-    console.error('[Trigger] onPostCreate', error);
-    return c.json<TriggerResponse>({ status: 'error', message: 'Failed' }, 400);
+    console.error('on-post-create error:', error);
+    return c.json({ status: 'error', message: 'Failed' }, 400);
   }
 });
 
 triggers.post('/on-comment-create', async (c) => {
   try {
-    const input = await c.req.json<OnCommentCreateRequest>();
-    await handleCommentCreate(input, wm);
-    return c.json<TriggerResponse>({ status: 'success', message: 'Event recorded' }, 200);
+    const subreddit = context.subredditName;
+    if (!subreddit) {
+      return c.json({ status: 'error', message: 'No subreddit' }, 400);
+    }
+
+    const username = await reddit.getCurrentUsername();
+    const event = toActivityEvent('comment', context.postId ?? '', username ?? 'unknown');
+    const kv = createKVStore();
+    const wm = new WindowManager(kv, subreddit);
+    await wm.recordEvent(event);
+
+    return c.json({ status: 'success', message: 'Comment recorded' }, 200);
   } catch (error) {
-    console.error('[Trigger] onCommentCreate', error);
-    return c.json<TriggerResponse>({ status: 'error', message: 'Failed' }, 400);
+    console.error('on-comment-create error:', error);
+    return c.json({ status: 'error', message: 'Failed' }, 400);
   }
 });
 
-triggers.post('/on-cron-tick', async (c) => {
+triggers.post('/scheduler', async (c) => {
   try {
-    await handleSchedulerTick(orchestrator, dispatcher, wm);
-    return c.json<TriggerResponse>({ status: 'success', message: 'Cycle complete' }, 200);
+    await c.req.json<TaskRequest>();
+    const subreddit = context.subredditName;
+    if (!subreddit) {
+      return c.json<TaskResponse>({ status: 'error', message: 'No subreddit' }, 400);
+    }
+
+    await runScoring(subreddit);
+
+    return c.json<TaskResponse>({ status: 'success' }, 200);
   } catch (error) {
-    console.error('[Trigger] onCronTick', error);
-    return c.json<TriggerResponse>({ status: 'error', message: 'Failed' }, 400);
+    console.error('scheduler error:', error);
+    return c.json<TaskResponse>({ status: 'error' }, 400);
   }
 });

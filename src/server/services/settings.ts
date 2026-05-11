@@ -1,50 +1,46 @@
 import type { SubredditConfig } from '../../shared/dto/modsignal';
-import { KEY_CONFIG } from '../../shared/constants/kvKeys';
 import type { KVStore } from '../storage/kvStore';
+import { kvKeys } from '../../shared/constants/kvKeys';
 
-const DEFAULT_CONFIG: SubredditConfig = {
-  subreddit: '',
-  enabled: true,
-  burstThreshold: 3.0,
-  similarityThreshold: 0.7,
-  windowMinutes: 5,
-  cooldownMinutes: 15,
-  autoTuneEnabled: true,
-};
+export class SettingsService {
+  constructor(
+    private readonly kv: KVStore,
+    private readonly subreddit: string
+  ) {}
 
-export interface SettingsService {
-  getOrCreateConfig(subreddit: string): Promise<SubredditConfig>;
-  updateConfig(subreddit: string, updates: Partial<SubredditConfig>): Promise<SubredditConfig>;
-  autoTune(config: SubredditConfig, wasFalsePositive: boolean): SubredditConfig;
-}
+  async getConfig(): Promise<SubredditConfig> {
+    const key = kvKeys.subredditConfig(this.subreddit);
+    const existing = await this.kv.get<SubredditConfig>(key);
+    return existing ?? {
+      subreddit: this.subreddit,
+      enabled: true,
+      burstThreshold: 3,
+      similarityThreshold: 0.75,
+      windowMinutes: 5,
+      cooldownMinutes: 15,
+      autoTuneEnabled: true,
+    };
+  }
 
-export const createSettingsService = (store: KVStore): SettingsService => ({
-  async getOrCreateConfig(subreddit: string): Promise<SubredditConfig> {
-    const existing = await store.getJSON<SubredditConfig>(KEY_CONFIG(subreddit));
-    if (existing) return existing;
-    const config: SubredditConfig = { ...DEFAULT_CONFIG, subreddit };
-    await store.setJSON(KEY_CONFIG(subreddit), config);
-    return config;
-  },
-
-  async updateConfig(subreddit: string, updates: Partial<SubredditConfig>): Promise<SubredditConfig> {
-    const current = await this.getOrCreateConfig(subreddit);
-    const updated: SubredditConfig = { ...current, ...updates, subreddit };
-    await store.setJSON(KEY_CONFIG(subreddit), updated);
+  async updateConfig(updates: Partial<SubredditConfig>): Promise<SubredditConfig> {
+    const current = await this.getConfig();
+    const updated = { ...current, ...updates };
+    await this.kv.set(kvKeys.subredditConfig(this.subreddit), updated);
     return updated;
-  },
+  }
 
-  autoTune(config: SubredditConfig, wasFalsePositive: boolean): SubredditConfig {
-    if (!config.autoTuneEnabled) return config;
+  async autoTune(
+    wasFalsePositive: boolean,
+    currentConfig: SubredditConfig
+  ): Promise<SubredditConfig> {
+    if (!currentConfig.autoTuneEnabled) return currentConfig;
 
-    let { burstThreshold } = config;
+    const adjustment = wasFalsePositive ? 0.5 : -0.25;
+    const newThreshold = Math.max(
+      1,
+      Math.min(10, currentConfig.burstThreshold + adjustment)
+    );
 
-    if (wasFalsePositive) {
-      burstThreshold = Math.min(burstThreshold + 0.5, 10.0);
-    } else {
-      burstThreshold = Math.max(burstThreshold - 0.3, 1.0);
-    }
-
-    return { ...config, burstThreshold };
-  },
-});
+    return this.updateConfig({ burstThreshold: Math.round(newThreshold * 10) / 10 });
+  }
+}
