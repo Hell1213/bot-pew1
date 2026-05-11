@@ -1,6 +1,6 @@
 {
   "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
-  "name": "bot-pew1",
+  "name": "ModSignal",
   "post": {
     "dir": "dist/client",
     "entrypoints": {
@@ -25,13 +25,21 @@
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/post-create"
+      },
+      {
+        "label": "Dismiss Alert",
+        "description": "Dismiss a ModSignal alert",
+        "location": "post",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/dismiss-alert"
       }
     ]
   },
   "triggers": {
     "onAppInstall": "/internal/triggers/on-app-install",
     "onPostCreate": "/internal/triggers/on-post-create",
-    "onCommentCreate": "/internal/triggers/on-comment-create"
+    "onCommentCreate": "/internal/triggers/on-comment-create",
+    "onCronTick": "/internal/triggers/on-cron-tick"
   },
   "scheduler": {
     "tasks": {
